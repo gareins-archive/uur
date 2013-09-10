@@ -11,56 +11,50 @@ import hashlib
 import time
 
 #============= Global Variables ========================#
-														#
-PATH_LIST = "repos/%s/"									#
-PATH_PACKAGE = "pool/"									#
-URL_PPA = "http://ppa.launchpad.net/%s/ubuntu/dists/"	#
-														#
-BASH_ARIA = "aria2c -t 5 -d %s -o %s %s"				#
-														#
-DISTROS = ["lucid", "precise", "quantal", "raring"]		#
-ARCHITECTURES = ["i386", "amd64"]						#
-														#
-#=======================================================#
+
+PATH_LIST = "repos/%s/"	
+PATH_PACKAGE = "pool/"
+URL_PPA = "http://ppa.launchpad.net/%s/ubuntu/dists/"
+
+BASH_ARIA = "aria2c -t 5 -d %s -o %s %s"
+
+DISTROS = ["lucid", "precise", "quantal", "raring"]
+ARCHITECTURES = ["i386", "amd64"]
 
 
 #============= Database - MongoDB init =================#
-#														#
-# COLLECTION_NAMES = ["Versions", "Repos", "Packages"]	#
-#														#
-														#
-DB = None												#
-DATABASE_NAME = "proba1"								#
-														#
-def dbInit(reset = False):								#
-	from pymongo import MongoClient						#
-	global DB											#
-	DB = MongoClient()[DATABASE_NAME]					#
-	if reset:											#
-		from pymongo import Connection					#
-		c = Connection().drop_database(DATABASE_NAME)	#
-		DB = MongoClient()[DATABASE_NAME]				#
-														#
-#=======================================================#
+# COLLECTION_NAMES = ["Versions", "Repos", "Packages"]  #
+
+DB = None
+DATABASE_NAME = "proba1"
+
+def dbInit(reset = False):
+	from pymongo import MongoClient	
+	global DB
+	DB = MongoClient()[DATABASE_NAME]
+	if reset:
+		from pymongo import Connection
+		c = Connection().drop_database(DATABASE_NAME)
+		DB = MongoClient()[DATABASE_NAME]
+
 
 
 #====================== Logger =========================#
-														#
-LOG = True												#
+
+LOG = True			
 LOG_FUNCS = ["providedSolver"]
-														#
-if LOG:													#
-	import inspect										#
-														#
-def logger(toPrint):									#
-	if not LOG:											#
-		return											#
-	cF = inspect.currentframe()							#
-	fName = inspect.getouterframes(cF,2)[1][3]			#
-	if fName in LOG_FUNCS:								#
-		print(toPrint)									#
-														#
-#=======================================================#
+
+if LOG:	
+	import inspect
+
+def logger(toPrint):
+	if not LOG:	
+		return	
+	cF = inspect.currentframe()	
+	fName = inspect.getouterframes(cF,2)[1][3]
+	if fName in LOG_FUNCS:
+		print(toPrint)
+
 
 #======================= Common Tools ==============================#
 
