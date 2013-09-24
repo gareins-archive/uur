@@ -5,56 +5,105 @@ import os
 import errno
 import datetime
 import requests
-import pymongo
 import hashlib
+from bson.objectid import ObjectId
+import inspect
+import copy
 
 import time
 
 #============= Global Variables ========================#
-
-PATH_LIST = "repos/%s/"	
-PATH_PACKAGE = "pool/"
-URL_PPA = "http://ppa.launchpad.net/%s/ubuntu/dists/"
-
-BASH_ARIA = "aria2c -t 5 -d %s -o %s %s"
-
-DISTROS = ["lucid", "precise", "quantal", "raring"]
-ARCHITECTURES = ["i386", "amd64"]
+														#
+PATH_LIST = "repos/%s/"									#
+PATH_PACKAGE = "pool/"									#
+URL_PPA = "http://ppa.launchpad.net/%s/ubuntu/dists/"	#
+														#
+BASH_ARIA = "aria2c -t 5 -d %s -o %s %s"				#
+														#
+DISTROS = ["lucid", "precise", "quantal", "raring"]		#
+ARCHITECTURES = ["i386", "amd64"]						#
+														#
+DB = None												#
+DATABASE_NAME = "proba1"								#
+														#
+REPO_FILE = "repos.txt"									#
+PACKAGES_FILE = "mainPkgs.txt"							#
+														#
+#=======================================================#
 
 
 #============= Database - MongoDB init =================#
-# COLLECTION_NAMES = ["Versions", "Repos", "Packages"]  #
+'''
+COLLECTION_NAMES = 
+	[
+	"Versions"
+	"Repos"
+	"Packages"
+	"PkgLists"
+	"Files"
+	"MainPkgs" 
+	]
+'''
 
-DB = None
-DATABASE_NAME = "proba1"
-
-def dbInit(reset = False):
-	from pymongo import MongoClient	
+def initDB(reset = False):
+	from pymongo import MongoClient, Connection
+	
 	global DB
 	DB = MongoClient()[DATABASE_NAME]
 	if reset:
-		from pymongo import Connection
 		c = Connection().drop_database(DATABASE_NAME)
 		DB = MongoClient()[DATABASE_NAME]
+		initRepos()
+		initMainPkgs()
 
+def initRepos():
+	f = open(REPO_FILE, "r")
+	for line in f:
+		if line[0] in ["#", "\n"]:
+			continue
+		repo, enabled = line[0:-1].split(" ")
+		r_id = Repo.addRepo(repo)
+		if not enabled:
+			DB.Repos.update({"_id": r_id}, {"$set": {"disabled": True}})
 
+def initMainPkgs():
+	f = open(PACKAGES_FILE, "r")
+	for line in f:
+		if line[0] in ["#", "\n"]:
+			continue
+		
+		repoName, packageName, *optPackages = line[0:-1].split(" ")
+		pkgDict = DB.Packages.find_one({"name": packageName})
+		repoDict = DB.Repos.find_one({"name": repoName})
+		
+		if not (repoDict["_id"] in pkgDict["repo_ids"]):
+			raise Exception("Repo and package do not match: %s-%s" % (repoName, packageName))
+		
+		toAdd = {
+		"name": packageName,
+		"repo_id": repoDict["_id"],
+		"package_id": pkgDict["_id"],
+		"usePrev": False,
+		"optPkg_ids": []}
+		
+		for opt in optPackages:
+			optDict = DB.Packages.find_one({"name": opt})
+			toAdd["optPkg_ids"].append(optDict["_id"])
+		
+		DB.MainPkgs.save(toAdd)
 
-#====================== Logger =========================#
+#============================ Logger ===============================#
 
-LOG = True			
-LOG_FUNCS = ["providedSolver"]
-
-if LOG:	
-	import inspect
+LOG = False
+LOG_FUNCS = ["solveDependencies", "updateAll"]
 
 def logger(toPrint):
-	if not LOG:	
-		return	
-	cF = inspect.currentframe()	
+	if not LOG:
+		return
+	cF = inspect.currentframe()
 	fName = inspect.getouterframes(cF,2)[1][3]
 	if fName in LOG_FUNCS:
 		print(toPrint)
-
 
 #======================= Common Tools ==============================#
 
@@ -76,86 +125,50 @@ def silentMove(_from, _to):
 		if e.errno != errno.ENOENT:
 			raise #raise if error is not "no such file or directory"
 
-#===================================================================#
+def savePkgList(lst):
+	#returns id of list in DB
+	hsh = hash(lst)
+	tmpList = DB.PkgLists.find_one({"hash":hsh})
+	if tmpList:
+		toRet = tmpList["_id"]
+	else:
+		listObject2Save = {"pkgs": lst, "hash": hsh}
+		toRet = DB.PkgLists.save(listObject2Save)
+	
+	return toRet
+		
+	
+#======================== Updater ==================================#
 
-#======================== Solvers ==================================#
+def updateAll():
+	for mainPkg in DB.MainPkgs.find():
+		if mainPkg["usePrev"]:
+			continue
+		t = time.time()
+		r = Repo.getFromDB(mainPkg["repo_id"])
+		print("getFromDB :: " + str(time.time()-t))
+		r.updateMe()
+		print("updateMe :: " + str(time.time()-t))
+		r.providedSolver()
+		print("Provided :: " + str(time.time()-t))
+		
+		pkg_ids = mainPkg["optPkg_ids"]
+		pkg_ids.append(mainPkg["package_id"])
+		
+		for p_id in pkg_ids:
+			P = Package.getFromDB(p_id)
+			logger("solving " + str(P.name))
+			P.solveDependencies(r._id)
+			print("dependencie-" + str(P.name) + " :: " + str(time.time()-t))
 
-def dependencieSolver(repo_id):
-	return
-
-def providedSolver(repo_id):
-	pkgs = {} #speedUp
-	for v_dict in DB.Versions.find({"repo_id": repo_id, "status": 1}):
-		logger("SOLVING :: \n" + str(v_dict))
-		solvingVersion = Version(**v_dict)
-		for pName in solvingVersion.provides:
-			logger(pName)
-			if pName in pkgs:
-				p = pkgs[pName]
-			else:
-				p = Package.searchDB(pName)
 			
-			if p is None:
-				logger("\tCreating new package")
-				newP = Package(pName)
-				newP.repo_ids = [repo_id]
-				newP._id = P.saveToDB()
-				
-				newV = Version(repo_id)
-				newV.package_id = newP._id
-				newV.architecture = solvingVersion.architecture
-				newV.v = ""
-				newV.releaseDate = datetime.datetime.now().timestamp()
-				newV.depends = []
-				newV.file_id = None
-				newV.status = 0
-				newV.provides = []
-				v_id = newV.saveToDB
-				
-				newP.version_ids = [v_id]
-				newP.saveToDB()
-				continue
-								
-			finder = {
-				"repo_id": repo_id, 
-				"architecture": {"$in": [solvingVersion.architecture, "all"]},
-				"package_id": p._id, 
-				"distro": solvingVersion.distro
-				}
-				
-			tmpV_dict = DB.Versions.find(finder)
-			logger("DEPENDENCIE :: \n" + str(tmpV_dict))
-			input()
-			break
-			
-			
-			# IF this package does not exists in DB:
-			if p is None:
-				#newV = Version(
-				
-				#newP = Package(pName)
-				#newP.version_ids = []
-				pkgs[pName] = None
-			elif "providedBy" in p.__dict__:
-				if p[_id] not in P.providedBy:
-					P.providedBy.append(p[_id])
-			else:
-				return
-				#for v in P.
-		break
-
-
-#########################################################################
-############################### CLASSES #################################
-#########################################################################
+		
+#####################################################################
+############################# CLASSES ###############################
+#####################################################################
 
 class Package:
-	'''
-	_id
-	name
-	repo_ids
-	version_ids
-	'''
+
 	def __init__(self, *args, **kwargs):
 		if args:
 			self.name = args[0]
@@ -232,12 +245,13 @@ class Package:
 				ORs = d.split(" | ")
 				for or_dependencie in ORs:
 					depends.append(or_dependencie.split(" ",1)[0])
-		newV.depends = list(set(depends))
+		newV.depends = tuple(set(depends))
 		
-		newV.provides = []
+		provides = []
 		if "Provides" in pkg:	
 			for provided in pkg["Provides"].split(", "):
-				newV.provides.append(provided)
+				provides.append(provided)
+		newV.provides = tuple(set(provides))
 			
 		v_id = newV.saveToDB()
 		P.version_ids.append(v_id)
@@ -245,23 +259,26 @@ class Package:
 		
 	def solveDependencies(self, repo_id):
 		for v_id in self.version_ids:
-			myDependencies = []
 			tmpV = Version.getFromDB(v_id)
+			if tmpV.status != 2:
+				continue #old, already solved
+			toInclude = []
 			logger("solving version :: " + tmpV.distro + "." + tmpV.architecture)
-			myDependencies.append(v_id)
-			tmpV.dependencieHelper(repo_id, tmpV.architecture, myDependencies)
-			tmpV.depends = myDependencies
+			toInclude.append(v_id)
+			tmpV.dependencieHelper(repo_id, tmpV.architecture, toInclude)
+			tmpV.include = toInclude
+			tmpV.status = 3
 			tmpV.saveToDB()
 		
 	def fillFromDB(self):
 		return Package.searchDB(self.name)
 		
 	def getFromDB(_id):
-		return DB.Packages.find_one({"_id": _id})
+		pDict = DB.Packages.find_one({"_id": _id})
+		return Package(**pDict)
 		
 	def searchDB(name):
 		pDict = DB.Packages.find_one({"name": name})
-		
 		if not pDict:
 			return None
 		return Package(**pDict)
@@ -270,28 +287,14 @@ class Package:
 		return DB.Packages.save(self.__dict__)
 	
 class Version:
-	'''
-	_id
-	repo_id
-	architecture
-	distro
-	v (version)
-	
-	depends
-	provides
-	
-	size
-	fileLocation
-	sha256
-	downloaded
-	'''
+
 	def __init__(self, *args, **kwargs):
 		if args:
 			self.repo_id = args[0]
 		elif kwargs:
 			self.__dict__.update(kwargs)
 			
-	def dependencieHelper(self, repo_id, mainArch, mainDependencies):		
+	def dependencieHelper(self, repo_id, mainArch, toInclude):		
 		for dep in self.depends:					
 			depPkg = Package.searchDB(dep)
 			if depPkg is None:
@@ -310,9 +313,9 @@ class Version:
 					logger("\t\t\txA\t%s.%s" % (tmpV.architecture, mainArch))
 					continue
 				if not str(tmpV.repo_id) == str(repo_id):
-					logger("\t\t\txA\t%s:%s" % (str(tmpV.repo_id), str(repo_id)))
+					logger("\t\t\txR\t%s:%s" % (str(tmpV.repo_id), str(repo_id)))
 					continue
-				if tmpV._id in mainDependencies:
+				if tmpV._id in toInclude:
 					logger("\t\t\txI")
 					depV = None
 					break
@@ -324,22 +327,39 @@ class Version:
 				continue
 			
 			logger("\tRECURSION_START :: " + depPkg.name)
-			#input()
-			mainDependencies.append(depV._id)
-			depV.dependencieHelper(repo_id, mainArch, mainDependencies)
+			toInclude.append(depV._id)
+			depV.dependencieHelper(repo_id, mainArch, toInclude)
 			logger("\tRECURSION_STOP :: " + depPkg.name)
-			
 
-	
 	def getFromDB(_id):
 		vDict = DB.Versions.find_one({"_id": _id})
 		#if not in DB, raise!
 		if not vDict:
-			raise
+			raise Exception("_ID not found: " + str(_id))
+			
+		d = {"depInDB": "depends", "provInDB": "provides"}
+		for (inDB, names) in d.items():	
+			vDict[inDB] = vDict[names]
+			vDict[names] = tuple(DB.PkgLists.find_one(vDict[names])["pkgs"])
+		
 		return Version(**vDict)
 		
 	def saveToDB(self):
-		return DB.Versions.save(self.__dict__)
+		cpy = copy.copy(self)
+		
+		d = {"depInDB": "depends", "provInDB": "provides"}
+		for (inDB, names) in d.items():
+			if hasattr(cpy, inDB):
+				h = cpy.__dict__.pop(inDB)
+				if h:
+					setattr(cpy, names, h)
+					continue
+			
+			toRet = savePkgList(cpy.__dict__[names])	
+			setattr(cpy, names, toRet)
+
+		
+		return DB.Versions.save(cpy.__dict__)
 	
 	def setupFile():
 		#  Download Filename, 
@@ -349,12 +369,6 @@ class Version:
 		return None
 	
 class Repo:
-	'''
-	releases
-	name
-	disabled
-	holdUpdate
-	'''
 	
 	def __init__(self, *args, **kwargs):
 		if args:
@@ -387,7 +401,7 @@ class Repo:
 				R = Repo(**r)
 				R.updateMe()
 		
-	def updateLists(self):
+	def updateLists(self):		
 		urlStart = URL_PPA % self.name
 		loc = PATH_LIST % re.sub("/","-", self.name)
 				
@@ -445,10 +459,6 @@ class Repo:
 	def updatePackages(self):
 		for k,v in self.releases.items():
 			if v[0] != 1:
-				if v[0] == 0:
-					self.releases[k] = 0
-				elif v[0] == -1:
-					self.releases[k] = v[1]
 				continue
 			
 			distro,arch = k.split("-")
@@ -463,10 +473,74 @@ class Repo:
 				if len(showpkg) <= 1:
 					continue
 				Package.listItemUpdate(showpkg, self._id, distro)
-
-			self.releases[k] = 0
 		
 		self.saveToDB()
+		
+	def providedSolver(self):
+		repo_id = self._id
+		pkgs = {} #speedUp
+		toParse_ids = DB.Versions.find({"repo_id": repo_id, "status": 1}, {"_id":1})
+
+		for parentV_id in toParse_ids:
+			parentV_id = parentV_id["_id"]
+			
+			parentV = Version.getFromDB(parentV_id)
+			parentName = DB.Packages.find_one({"_id": parentV.package_id})["name"]
+
+			DB.Versions.update({"_id": parentV._id}, {"$set": {"status": 2}})
+						
+			for pName in parentV.provides:
+				logger(pName)
+				if pName in pkgs:
+					p = pkgs[pName]
+				else:
+					p = Package.searchDB(pName)
+				
+				inVersions = False
+				if p:
+					for version_id in p.version_ids:
+						finder = {
+							"_id": version_id, 
+							"repo_id": repo_id, 
+							"architecture": {"$in": [parentV.architecture, "all"]},
+							"package_id": p._id, 
+							"distro": parentV.distro
+							}
+						tmpV_id = DB.Versions.find_one(finder, {"_id":1})
+						if tmpV_id:					
+							v = Version.getFromDB(tmpV_id["_id"])
+							tmpDeps = set(v.depends)
+							tmpDeps.add(parentName)
+							v.depends = tuple(tmpDeps)
+							logger("\tupdated...\n\t:" + str(v.__dict__))
+							v.depInDB = False
+							v.saveToDB()
+							inVersions = True
+							break
+
+				if not inVersions:
+					if p is None:
+						logger("\tcreated package :: " + pName)
+						p = Package(pName)
+						p.repo_ids = [repo_id]
+						p.version_ids = []
+						p._id = p.saveToDB()
+							
+					newV = Version(repo_id)
+					newV.package_id = p._id
+					newV.distro = parentV.distro
+					newV.architecture = parentV.architecture
+					newV.v = ""
+					newV.releaseDate = datetime.datetime.now().timestamp()
+					newV.depends = tuple([parentName])
+					newV.file_id = None
+					newV.status = 0
+					newV.provides = tuple()
+					logger("\tcreated...\n\t" + str(newV.__dict__))
+					
+					v_id = newV.saveToDB()
+					p.version_ids.append(v_id)
+					p.saveToDB()
 				
 	def saveToDB(self):
 		return DB.Repos.save(self.__dict__)
@@ -477,19 +551,10 @@ class Repo:
 			
 	def checkInDB(**kwargs):
 		return bool(DB.Repos.find_one(kwargs))
-			
-	def removeFromDBbyName(name):
-		toFind = DB.Repos.find_one({"name": "otto-kesselgulasch/gimp"})
-		DB.Repos.remove(toFind["_id"])
-		
-	def disableRepo(self):
-		#add to disabled list
-		return True
-
-#########################################################################
-#########################################################################
-#########################################################################
-
+	
+	def getFromDB(repo_id):
+		dct = DB.Repos.find_one({"_id": repo_id})
+		return Repo(**dct)
 
 ########
 # MAIN #
@@ -497,30 +562,8 @@ class Repo:
 
 if __name__ == "__main__":
 	
-	dbInit(reset = True)
-	r = Repo.addRepo("otto-kesselgulasch/gimp")
-	providedSolver(r)
-	exit(42)
-	
 	t = time.time()
-	if(True):
-		dbInit(reset = True)
-		r = Repo.addRepo("libreoffice/ppa")
-	
-	else:
-		dbInit(reset = False)
-	
-	Package.searchDB("libreoffice").solveDependencies(r)
-	
-	print("\n\n")
-	p = Package.searchDB("libreoffice")
-	for v_id in p.version_ids:
-		for v in Version.getFromDB(v_id).depends:
-			print(Version.getFromDB(v).fileLocation)
-		break
-		
-	#Repo.updateAll()
-	#Repo.addRepo("libreoffice/ppa")
-	#Repo.addRepo("otto-kesselgulasch/gimp")
-	
+	initDB(reset = True)
+	updateAll()
 	print(time.time()-t)
+	exit(42)
